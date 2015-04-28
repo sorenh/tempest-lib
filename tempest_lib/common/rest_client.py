@@ -21,12 +21,12 @@ import re
 import time
 
 import jsonschema
-from oslo_log import log as logging
 import six
 
 from tempest_lib.common import http
 from tempest_lib.common.utils import misc as misc_utils
 from tempest_lib import exceptions
+from tempest_lib.openstack.common import log as logging
 
 # redrive rate limited calls at most twice
 MAX_RECURSION_DEPTH = 2
@@ -59,9 +59,6 @@ class RestClient(object):
     """
     TYPE = "json"
 
-    # The version of the API this client implements
-    api_version = None
-
     LOG = logging.getLogger(__name__)
 
     def __init__(self, auth_provider, service, region,
@@ -77,6 +74,8 @@ class RestClient(object):
         self.build_timeout = build_timeout
         self.trace_requests = trace_requests
 
+        # The version of the API this client implements
+        self.api_version = None
         self._skip_path = False
         self.general_header_lc = set(('cache-control', 'connection',
                                       'date', 'pragma', 'trailer',
@@ -393,13 +392,19 @@ class RestClient(object):
                           caller_name=None, extra=None):
         if 'X-Auth-Token' in req_headers:
             req_headers['X-Auth-Token'] = '<omitted>'
-        log_fmt = """Request - Headers: %s
+        log_fmt = """Request (%s): %s %s %s%s
+    Request - Headers: %s
         Body: %s
     Response - Headers: %s
         Body: %s"""
 
         self.LOG.debug(
             log_fmt % (
+                caller_name,
+                resp['status'],
+                method,
+                req_url,
+                secs,
                 str(req_headers),
                 self._safe_body(req_body),
                 str(resp),
@@ -420,20 +425,20 @@ class RestClient(object):
         caller_name = misc_utils.find_test_caller()
         if secs:
             secs = " %.3fs" % secs
-        self.LOG.info(
-            'Request (%s): %s %s %s%s' % (
-                caller_name,
-                resp['status'],
-                method,
-                req_url,
-                secs),
-            extra=extra)
+        if not self.LOG.isEnabledFor(real_logging.DEBUG):
+            self.LOG.info(
+                'Request (%s): %s %s %s%s' % (
+                    caller_name,
+                    resp['status'],
+                    method,
+                    req_url,
+                    secs),
+                extra=extra)
 
         # Also look everything at DEBUG if you want to filter this
         # out, don't run at debug.
-        if self.LOG.isEnabledFor(real_logging.DEBUG):
-            self._log_request_full(method, req_url, resp, secs, req_headers,
-                                   req_body, resp_body, caller_name, extra)
+        self._log_request_full(method, req_url, resp, secs, req_headers,
+                               req_body, resp_body, caller_name, extra)
 
     def _parse_resp(self, body):
         body = json.loads(body)
@@ -655,8 +660,9 @@ class RestClient(object):
         # NOTE(mtreinish): This is for compatibility with Glance and swift
         # APIs. These are the return content types that Glance api v1
         # (and occasionally swift) are using.
+        #application/octet-stream added. Bug = 1417458
         TXT_ENC = ['text/plain', 'text/html', 'text/html; charset=utf-8',
-                   'text/plain; charset=utf-8']
+                   'text/plain; charset=utf-8',"application/octet-stream"]
 
         if ctype.lower() in JSON_ENC:
             parse_resp = True
@@ -665,11 +671,8 @@ class RestClient(object):
         else:
             raise exceptions.InvalidContentType(str(resp.status))
 
-        if resp.status == 401:
+        if resp.status == 401 or resp.status == 403 or resp.status == 405:
             raise exceptions.Unauthorized(resp_body)
-
-        if resp.status == 403:
-            raise exceptions.Forbidden(resp_body)
 
         if resp.status == 404:
             raise exceptions.NotFound(resp_body)
